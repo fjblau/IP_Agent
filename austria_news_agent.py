@@ -203,8 +203,11 @@ class GermanNewsSource(NewsSource):
         all_articles = []
         
         # Default RSS feeds if none provided - focusing on Vorarlberg
+        # Prioritize vol.at as requested by user
         feeds = [
-            "https://www.vol.at/rss/feed/rss.xml",  # Vorarlberg Online (main Vorarlberg news)
+            "https://www.vol.at/rss/feed/rss.xml",  # Vorarlberg Online (main Vorarlberg news) - PRIMARY SOURCE
+            "https://www.vol.at/rss/feed/vorarlberg.xml",  # VOL.at Vorarlberg specific feed
+            "https://www.vol.at/rss/feed/oesterreich.xml", # VOL.at Austria news
             "https://www.vorarlberg.at/rss",        # Official Vorarlberg government news
             "https://www.vienna.at/rss/vorarlberg", # Vienna.at Vorarlberg section
             "https://www.orf.at/rss/vorarlberg",    # ORF Vorarlberg
@@ -413,21 +416,50 @@ class AustrianNewsFilter:
             logger.info(f"Filtering out live blog article based on URL: {title}")
             return False
             
-        # Filter out articles that are clearly about other countries and not Austria
-        non_austria_patterns = [
-            "in the uk", "uk this", "uk's", "britain", "british", 
-            "england", "scotland", "wales", "northern ireland", 
-            "london", "manchester", "edinburgh", "glasgow", "cardiff",
-            "in france", "in italy", "in spain", "in germany", 
-            "in the us", "in america", "american cities", "us cities"
+        # Filter out articles that are clearly about non-EU/US countries
+        # Focus on EU and US as per user preference
+        non_relevant_patterns = [
+            # Non-EU/US regions
+            "africa", "african", "malawi", "philippines", "duterte", "hong kong",
+            "china", "chinese", "india", "indian", "pakistan", "middle east",
+            "brazil", "brazilian", "mexico", "mexican", "australia", "australian", 
+            "new zealand", "japan", "japanese", "russia", "russian", 
+            "indonesia", "malaysia", "thailand", "vietnam", "korea",
+            "bangladesh", "nigeria", "egypt", "kenya",
+            "argentina", "colombia", "peru", "chile", "venezuela"
         ]
         
-        # Check if the article is specifically about another country and doesn't mention Austria
-        if any(pattern in title.lower() for pattern in non_austria_patterns):
+        # Countries that should be excluded unless explicitly about Austria
+        # Keep EU countries and US in the list but with lower priority
+        excluded_countries = [
+            # Non-EU/US countries (high priority exclusion)
+            "china", "india", "japan", "russia", "brazil", "mexico", 
+            "australia", "new zealand", "africa", "philippines", 
+            "indonesia", "malaysia", "thailand", "vietnam", "korea",
+            "pakistan", "bangladesh", "nigeria", "egypt", "south africa", "kenya",
+            "argentina", "colombia", "peru", "chile", "venezuela",
+            
+            # EU/US countries (lower priority exclusion - only exclude if no Austria connection)
+            "uk", "britain", "england", "scotland", "wales", "france", "italy", "spain",
+            "germany", "us", "usa", "america", "canada"
+        ]
+        
+        # Check if the article is specifically about a non-relevant country
+        if any(pattern in title.lower() for pattern in non_relevant_patterns):
             # Only filter if Austria or Vorarlberg is not also mentioned
-            if not any(keyword in title.lower() for keyword in ["austria", "austrian", "vorarlberg"]):
-                logger.info(f"Filtering out non-Austria article: {title}")
+            if not any(keyword in title.lower() for keyword in ["austria", "austrian", "vorarlberg", "eu", "europe", "european union"]):
+                logger.info(f"Filtering out non-relevant article: {title}")
                 return False
+                
+        # Check if the article mentions a country that's not Austria
+        # and doesn't explicitly mention Austria in the title or first part of content
+        for country in excluded_countries:
+            if country in title.lower() or country in description.lower()[:100]:
+                # Only filter if Austria or Vorarlberg is not also prominently mentioned
+                if not any(keyword in title.lower() or keyword in description.lower()[:100] 
+                          for keyword in ["austria", "austrian", "vorarlberg", "vienna", "wien", "salzburg", "tyrol", "tirol"]):
+                    logger.info(f"Filtering out article about {country}: {title}")
+                    return False
         
         # Check if the article is recent (within the last 3 days - stricter time filter)
         published_at = article.get("publishedAt", "")
@@ -462,6 +494,10 @@ class AustrianNewsFilter:
                 
                 # If we successfully parsed the date, check if it's older than 3 days (stricter)
                 if pub_date:
+                    # Ensure both datetimes are timezone-naive for comparison
+                    if pub_date.tzinfo is not None:
+                        pub_date = pub_date.replace(tzinfo=None)
+                    
                     days_old = (datetime.now() - pub_date).days
                     if days_old > 3:
                         logger.info(f"Filtering out old article from {pub_date.strftime('%Y-%m-%d')} ({days_old} days old): {title}")
@@ -477,7 +513,7 @@ class AustrianNewsFilter:
         
         # Check for Vorarlberg-specific keywords in title (highest priority)
         if any(keyword.lower() in title.lower() for keyword in self.vorarlberg_keywords):
-            relevance_score += 5
+            relevance_score += 7  # Increased from 5 to prioritize Vorarlberg content
             
         # Check for other category keywords in title
         if any(keyword.lower() in title.lower() for keyword in self.healthcare_keywords):
@@ -492,21 +528,26 @@ class AustrianNewsFilter:
         if any(keyword.lower() in title.lower() for keyword in self.outdoor_keywords):
             # Check if there's an Austria connection
             if any(keyword in all_text.lower() for keyword in ["austria", "austrian", "vorarlberg", "tyrol", "tirol", "alps", "alpen"]):
-                relevance_score += 3  # Higher score if Austria-related
+                relevance_score += 4  # Higher score if Austria-related (increased from 3)
             else:
-                relevance_score += 1  # Lower score if not clearly Austria-related
+                relevance_score += 0  # No points if not clearly Austria-related (decreased from 1)
                 
         if any(keyword.lower() in title.lower() for keyword in self.cultural_keywords):
             # Check if there's an Austria connection
             if any(keyword in all_text.lower() for keyword in ["austria", "austrian", "vorarlberg", "vienna", "wien", "salzburg"]):
-                relevance_score += 3  # Higher score if Austria-related
+                relevance_score += 4  # Higher score if Austria-related (increased from 3)
             else:
-                relevance_score += 1  # Lower score if not clearly Austria-related
+                relevance_score += 0  # No points if not clearly Austria-related (decreased from 1)
+        
+        # Bonus points for Austrian sources
+        url = article.get("url", "").lower()
+        if any(domain in url for domain in ["vol.at", "vienna.at", "vorarlberg.at", "orf.at", "vn.at"]):
+            relevance_score += 3  # Bonus for Austrian news sources
             
         # Check for Vorarlberg-specific keywords in description/content
         if any(keyword.lower() in description.lower() or keyword.lower() in content.lower() 
                for keyword in self.vorarlberg_keywords):
-            relevance_score += 3
+            relevance_score += 4  # Increased from 3 to prioritize Vorarlberg content
             
         # Check for other category keywords in description/content
         if any(keyword.lower() in description.lower() or keyword.lower() in content.lower() 
@@ -520,10 +561,14 @@ class AustrianNewsFilter:
             relevance_score += 2
         if any(keyword.lower() in description.lower() or keyword.lower() in content.lower() 
                for keyword in self.outdoor_keywords):
-            relevance_score += 1
+            # Only add points if there's an Austria connection
+            if any(keyword in all_text.lower() for keyword in ["austria", "austrian", "vorarlberg", "tyrol", "tirol", "alps", "alpen"]):
+                relevance_score += 2  # Increased from 1 for Austria-related outdoor content
         if any(keyword.lower() in description.lower() or keyword.lower() in content.lower() 
                for keyword in self.cultural_keywords):
-            relevance_score += 1
+            # Only add points if there's an Austria connection
+            if any(keyword in all_text.lower() for keyword in ["austria", "austrian", "vorarlberg", "vienna", "wien", "salzburg"]):
+                relevance_score += 2  # Increased from 1 for Austria-related cultural content
             
         # Count the number of unique keywords that match
         matched_keywords = set()
@@ -549,7 +594,7 @@ class AustrianNewsFilter:
         return is_relevant
     
     def categorize_article(self, article: Dict[str, Any]) -> Dict[str, bool]:
-        """Categorize article by interest areas"""
+        """Categorize article by interest areas with improved accuracy"""
         # Extract text from article
         title = article.get("title", "").lower()
         description = article.get("description", "").lower()
@@ -558,15 +603,68 @@ class AustrianNewsFilter:
         # Combine all text for searching
         all_text = f"{title} {description} {content}"
         
-        # Check each category
+        # Prioritize title matches (3x weight)
+        title_weight = 3
+        
+        # Calculate scores for each category
+        vorarlberg_score = sum(1 * title_weight if keyword.lower() in title else 1 
+                              for keyword in self.vorarlberg_keywords 
+                              if keyword.lower() in all_text)
+        
+        healthcare_score = sum(1 * title_weight if keyword.lower() in title else 1 
+                              for keyword in self.healthcare_keywords 
+                              if keyword.lower() in all_text)
+        
+        retirement_score = sum(1 * title_weight if keyword.lower() in title else 1 
+                              for keyword in self.retirement_keywords 
+                              if keyword.lower() in all_text)
+        
+        expat_score = sum(1 * title_weight if keyword.lower() in title else 1 
+                         for keyword in self.expat_keywords 
+                         if keyword.lower() in all_text)
+        
+        outdoor_score = sum(1 * title_weight if keyword.lower() in title else 1 
+                           for keyword in self.outdoor_keywords 
+                           if keyword.lower() in all_text)
+        
+        cultural_score = sum(1 * title_weight if keyword.lower() in title else 1 
+                            for keyword in self.cultural_keywords 
+                            if keyword.lower() in all_text)
+        
+        # Require a minimum score to consider an article part of a category
+        # This prevents articles with just one minor keyword mention from being categorized
+        min_category_score = 2
+        
+        # Special case: If article is specifically about Austria/Vorarlberg, lower the threshold
+        is_austria_specific = any(keyword in title.lower() for keyword in ["austria", "austrian", "vorarlberg", "vienna", "wien"])
+        if is_austria_specific:
+            min_category_score = 1
+        
+        # Check if article is from an Austrian source
+        url = article.get("url", "").lower()
+        is_austrian_source = any(domain in url for domain in ["vol.at", "vienna.at", "vorarlberg.at", "orf.at", "vn.at"])
+        
+        # Determine if article has Austria/Vorarlberg connection
+        has_austria_connection = any(keyword in all_text.lower() for keyword in 
+                                    ["austria", "austrian", "vorarlberg", "tyrol", "tirol", 
+                                     "vienna", "wien", "salzburg", "innsbruck", "graz", "linz"])
+        
+        # Special case for Vorarlberg - prioritize this category
+        is_vorarlberg_specific = vorarlberg_score >= 2 or "vorarlberg" in title.lower() or is_austrian_source
+        
+        # Check each category with minimum score requirement and appropriate context
         categories = {
-            "Healthcare": any(keyword.lower() in all_text for keyword in self.healthcare_keywords),
-            "Retirement": any(keyword.lower() in all_text for keyword in self.retirement_keywords),
-            "American Expat": any(keyword.lower() in all_text for keyword in self.expat_keywords),
-            "Outdoor Activities": any(keyword.lower() in all_text for keyword in self.outdoor_keywords),
-            "Cultural Events": any(keyword.lower() in all_text for keyword in self.cultural_keywords),
-            "Vorarlberg": any(keyword.lower() in all_text for keyword in self.vorarlberg_keywords)
+            "Healthcare": healthcare_score >= min_category_score and (has_austria_connection or is_austrian_source),
+            "Retirement": retirement_score >= min_category_score and (has_austria_connection or is_austrian_source),
+            "American Expat": expat_score >= min_category_score,
+            "Outdoor Activities": outdoor_score >= min_category_score and (has_austria_connection or is_austrian_source),
+            "Cultural Events": cultural_score >= min_category_score and (has_austria_connection or is_austrian_source),
+            "Vorarlberg": is_vorarlberg_specific  # Special handling for Vorarlberg as primary focus
         }
+        
+        # If article is from an Austrian source but doesn't fit any category, put it in Vorarlberg
+        if is_austrian_source and not any(categories.values()):
+            categories["Vorarlberg"] = True
         
         return categories
 
@@ -577,7 +675,11 @@ class ArticleProcessor:
         self.translator = None
         try:
             from googletrans import Translator
-            self.translator = Translator()
+            # Initialize with specific service URLs to improve reliability
+            self.translator = Translator(service_urls=['translate.google.com', 'translate.google.co.kr'])
+            # Test the translator with a simple phrase
+            test_translation = self.translator.translate('Hallo', src='de', dest='en')
+            logger.info(f"Translator initialized successfully. Test: 'Hallo' -> '{test_translation.text}'")
         except ImportError:
             logger.warning("Googletrans not available. German articles will not be translated.")
         except Exception as e:
@@ -605,20 +707,65 @@ class ArticleProcessor:
             processed["keywords"] = news_article.keywords
             processed["processed_date"] = datetime.now().isoformat()
             
+            # Detect if content is in German (either from source language or content analysis)
+            is_german = article.get("language", "") == "de" or "vol.at" in url.lower()
+            
+            # Also check the domain for Austrian sources
+            austrian_domains = ["vol.at", "vienna.at", "vorarlberg.at", "orf.at", "vn.at", "derstandard.at"]
+            if any(domain in url.lower() for domain in austrian_domains):
+                processed["is_austrian_source"] = True
+                # If not explicitly marked as German but from Austrian source, check content
+                if not is_german and processed.get("full_text"):
+                    # Simple heuristic: check for common German words
+                    german_indicators = ["und", "der", "die", "das", "für", "mit", "von", "bei", "ist"]
+                    text_sample = processed["full_text"][:500].lower()
+                    if sum(1 for word in german_indicators if f" {word} " in text_sample) >= 3:
+                        is_german = True
+                        processed["language"] = "de"
+            
             # Translate German content if needed
-            if self.translator and article.get("language", "") == "de":
+            if self.translator and is_german:
                 try:
                     # Translate title
                     if processed.get("title"):
-                        translated_title = self.translator.translate(processed["title"], src="de", dest="en")
-                        processed["original_title"] = processed["title"]
-                        processed["title"] = f"{translated_title.text} [Translated from German]"
+                        try:
+                            translated_title = self.translator.translate(processed["title"], src="de", dest="en")
+                            processed["original_title"] = processed["title"]
+                            processed["title"] = f"{translated_title.text} [Translated from German]"
+                            logger.info(f"Translated title: '{processed['original_title']}' -> '{translated_title.text}'")
+                        except Exception as e:
+                            logger.warning(f"Error translating title: {str(e)}")
                     
                     # Translate summary
                     if processed.get("summary"):
-                        translated_summary = self.translator.translate(processed["summary"], src="de", dest="en")
-                        processed["original_summary"] = processed["summary"]
-                        processed["summary"] = translated_summary.text
+                        try:
+                            translated_summary = self.translator.translate(processed["summary"], src="de", dest="en")
+                            processed["original_summary"] = processed["summary"]
+                            processed["summary"] = translated_summary.text
+                        except Exception as e:
+                            logger.warning(f"Error translating summary: {str(e)}")
+                    
+                    # Translate description if available
+                    if processed.get("description"):
+                        try:
+                            translated_desc = self.translator.translate(processed["description"], src="de", dest="en")
+                            processed["original_description"] = processed["description"]
+                            processed["description"] = translated_desc.text
+                        except Exception as e:
+                            logger.warning(f"Error translating description: {str(e)}")
+                    
+                    # Translate a portion of the full text if available
+                    if processed.get("full_text") and len(processed["full_text"]) > 0:
+                        try:
+                            # Only translate the first 1000 characters to avoid API limits
+                            text_to_translate = processed["full_text"][:1000]
+                            translated_text = self.translator.translate(text_to_translate, src="de", dest="en")
+                            processed["translated_text_sample"] = translated_text.text
+                            if not processed.get("summary") or len(processed["summary"]) < 50:
+                                # Use translated text as summary if no good summary exists
+                                processed["summary"] = translated_text.text[:300] + "..."
+                        except Exception as e:
+                            logger.warning(f"Error translating text sample: {str(e)}")
                     
                     logger.info(f"Translated German article: {processed.get('title', 'Unknown title')}")
                 except Exception as e:
@@ -661,15 +808,23 @@ class NewsDigestGenerator:
             if cat_articles:
                 # Filter out articles that have already been included in other categories
                 # Check both URL and title to avoid duplicates
-                unique_articles = [a for a in cat_articles 
-                                  if a.get("url", "") not in included_urls 
-                                  and a.get("title", "").strip() not in included_titles]
+                unique_articles = []
+                for a in cat_articles:
+                    url = a.get("url", "").strip()
+                    title = a.get("title", "").strip()
+                    # Remove the "[Translated from German]" suffix for comparison
+                    title_for_comparison = title.replace(" [Translated from German]", "").strip()
+                    
+                    if url and url not in included_urls and title_for_comparison not in included_titles:
+                        unique_articles.append(a)
+                        included_urls.add(url)
+                        included_titles.add(title_for_comparison)
                 
                 if unique_articles:
                     digest += f"## {category.title()} News ({len(unique_articles)} articles)\n\n"
                     
-                    # Limit to top 3 per category for a more concise digest
-                    articles_to_show = min(3, len(unique_articles))
+                    # Limit to top 5 per category as requested by user
+                    articles_to_show = min(5, len(unique_articles))
                     for article in unique_articles[:articles_to_show]:
                         title = article.get("title", "No title")
                         source = article.get("source", {}).get("name", article.get("source_name", "Unknown source"))
